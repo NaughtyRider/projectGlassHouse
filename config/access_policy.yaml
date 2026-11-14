@@ -1,0 +1,45 @@
+# GlassHouse column-level access policy.
+#
+# Actions:
+#   allow - column may be referenced anywhere and is returned as-is
+#   mask  - column may be referenced anywhere (incl. WHERE/JOIN), but any output value
+#           derived from it is masked
+#   deny  - query is rejected if the column is referenced anywhere
+#
+# Resolution order for a (table, column) reference:
+#   1. a table-wide entry under `tables`        ("table": deny) - wins over any column entry and
+#                                               also blocks column-less access such as COUNT(*)
+#   2. an explicit entry under `columns`        ("table.column": action)
+#   3. `default_column_action`                  (allow) - columns not listed are allowed
+#
+# Roles are matched exactly (case-sensitive). There is no default role: a request with a
+# missing or unknown role is refused with HTTP 403.
+
+version: 1
+default_column_action: allow
+
+roles:
+  l1_analyst:
+    description: First-line alert analyst. Works from account and transaction data; no direct customer identity.
+    columns:
+      customers.full_name: deny
+      customers.pan: deny
+      customers.phone: deny
+      accounts.account_number: mask
+
+  l2_investigator:
+    description: Second-line investigator. Sees customer names; identifiers are masked.
+    columns:
+      customers.full_name: allow
+      customers.pan: mask
+      customers.phone: mask
+      accounts.account_number: mask
+
+  auditor:
+    description: Internal audit. Reviews alerts and flows; no customer data or free-text narration.
+    tables:
+      customers: deny
+    columns:
+      accounts.account_number: deny
+      transactions.counterparty_account: deny
+      transactions.narration: deny

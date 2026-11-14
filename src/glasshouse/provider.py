@@ -58,8 +58,9 @@ Schema:
 """
 
 
-def build_prompt(question: str) -> str:
-    return f"{SYSTEM_PROMPT}{PROMPT_SCHEMA}\nQuestion: {question}\n"
+def build_prompt(question: str, schema: str = PROMPT_SCHEMA) -> str:
+    """``schema`` is the role-filtered schema text; denied columns are never in it."""
+    return f"{SYSTEM_PROMPT}{schema}\nQuestion: {question}\n"
 
 
 def normalize_question(question: str) -> str:
@@ -85,8 +86,9 @@ class LLMProvider(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def generate(self, question: str) -> SQLGeneration:
-        """Translate ``question`` into SQL or a refusal. Raises ProviderError on bad output."""
+    def generate(self, question: str, schema: str = PROMPT_SCHEMA) -> SQLGeneration:
+        """Translate ``question`` into SQL or a refusal using only ``schema`` (role-filtered).
+        Raises ProviderError on bad output."""
 
 
 class FakeProvider(LLMProvider):
@@ -104,8 +106,8 @@ class FakeProvider(LLMProvider):
         self._fixtures = {normalize_question(k): v for k, v in fixtures.items()}
         self.last_prompt: str | None = None
 
-    def generate(self, question: str) -> SQLGeneration:
-        self.last_prompt = build_prompt(question)  # built for parity with real providers
+    def generate(self, question: str, schema: str = PROMPT_SCHEMA) -> SQLGeneration:
+        self.last_prompt = build_prompt(question, schema)  # built for parity with real providers
         key = normalize_question(question)
         if key not in self._fixtures:
             return SQLGeneration(refusal_reason=self.UNKNOWN_REFUSAL)
@@ -122,7 +124,7 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.timeout = timeout
 
-    def generate(self, question: str) -> SQLGeneration:
+    def generate(self, question: str, schema: str = PROMPT_SCHEMA) -> SQLGeneration:
         import httpx  # imported lazily so the package has no hard network dependency
 
         body = {
@@ -130,7 +132,7 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "format": SQLGeneration.model_json_schema(),
             "options": {"temperature": 0},
-            "messages": [{"role": "user", "content": build_prompt(question)}],
+            "messages": [{"role": "user", "content": build_prompt(question, schema)}],
         }
         try:
             resp = httpx.post(f"{self.url}/api/chat", json=body, timeout=self.timeout)

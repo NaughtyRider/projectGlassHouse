@@ -16,7 +16,7 @@ README_EXAMPLES = {
 }
 
 
-def ask(client, question, role="analyst"):
+def ask(client, question, role="l2_investigator"):
     resp = client.post("/ask", json={"question": question, "role": role})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -67,8 +67,8 @@ def test_unsafe_fixture_sql_rejected(client, db_path, question):
     "WITH d AS (DELETE FROM alerts RETURNING *) SELECT * FROM d",
     "/**/dElEtE/**/FROM transactions",
 ])
-def test_configured_destructive_statement_is_rejected_and_db_unchanged(settings, db_path, sql):
-    client = make_client(settings, {"wipe it": {"sql": sql, "tables_used": [], "refusal_reason": None}})
+def test_configured_destructive_statement_is_rejected_and_db_unchanged(app_settings, db_path, sql):
+    client = make_client(app_settings, {"wipe it": {"sql": sql, "tables_used": [], "refusal_reason": None}})
     before = table_counts(db_path)
     body = ask(client, "wipe it")
     assert body["status"] == "rejected", body
@@ -84,8 +84,8 @@ def test_configured_destructive_statement_is_rejected_and_db_unchanged(settings,
     "not even json {",  # raw garbage string
     42,
 ])
-def test_malformed_provider_output_is_error_not_500(settings, payload):
-    client = make_client(settings, {"bad": payload})
+def test_malformed_provider_output_is_error_not_500(app_settings, payload):
+    client = make_client(app_settings, {"bad": payload})
     body = ask(client, "bad")
     assert body["status"] == "error"
     assert "malformed" in body["reason"]
@@ -119,27 +119,37 @@ def test_request_ids_unique(client):
     assert len(ids) == 5
 
 
-def test_role_accepted_but_not_enforced_yet(client):
-    a = ask(client, "How many open alerts are there per rule?", role="analyst")
-    b = ask(client, "How many open alerts are there per rule?", role="intern")
-    assert a["status"] == b["status"] == "ok" and a["rows"] == b["rows"]
+def test_unrestricted_query_identical_across_roles(client):
+    # Task 1 behaviour preserved: a query touching no restricted column is the same for every role.
+    results = [ask(client, "How many open alerts are there per rule?", role=r)
+               for r in ("l1_analyst", "l2_investigator", "auditor")]
+    assert all(r["status"] == "ok" for r in results)
+    assert results[0]["rows"] == results[1]["rows"] == results[2]["rows"]
 
 
-def test_execution_failure_is_error(settings):
-    client = make_client(settings, {"bad col": {"sql": "SELECT no_such_column FROM customers"}})
-    body = ask(client, "bad col")
+def test_execution_failure_is_error(app_settings):
+    # Passes validation and access policy, then fails inside SQLite at runtime.
+    client = make_client(app_settings, {"overflow": {"sql": "SELECT abs(-9223372036854775808) AS x FROM alerts"}})
+    body = ask(client, "overflow")
     assert body["status"] == "error" and "query failed" in body["reason"]
 
 
-def test_provider_exception_is_error_not_500(settings):
+def test_unknown_column_is_rejected_before_execution(app_settings):
+    # Since Task 2, columns are resolved against the catalog; unresolvable ones are rejected, not executed.
+    client = make_client(app_settings, {"bad col": {"sql": "SELECT no_such_column FROM customers"}})
+    body = ask(client, "bad col")
+    assert body["status"] == "rejected" and "no_such_column" in body["reason"]
+
+
+def test_provider_exception_is_error_not_500(app_settings):
     from glasshouse.app import create_app
     from fastapi.testclient import TestClient
 
     class Boom(FakeProvider):
-        def generate(self, question):
+        def generate(self, question, schema=None):
             raise RuntimeError("kaboom")
 
-    client = TestClient(create_app(settings, Boom({})))
+    client = TestClient(create_app(app_settings, Boom({})))
     body = ask(client, "anything")
     assert body["status"] == "error"
 

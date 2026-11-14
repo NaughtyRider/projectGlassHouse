@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from pathlib import Path
 
@@ -23,12 +24,29 @@ def settings(db_path) -> Settings:
 
 
 @pytest.fixture
-def client(settings) -> TestClient:
-    return TestClient(create_app(settings, FakeProvider()))
+def app_settings(settings, tmp_path) -> Settings:
+    """Session ledger + a fresh, per-test audit database (so audit row counts are exact)."""
+    return dataclasses.replace(settings, audit_db_path=tmp_path / "audit.db")
+
+
+@pytest.fixture
+def client(app_settings) -> TestClient:
+    return TestClient(create_app(app_settings, FakeProvider()))
 
 
 def make_client(settings: Settings, fixtures: dict) -> TestClient:
     return TestClient(create_app(settings, FakeProvider(fixtures)))
+
+
+def audit_rows(settings: Settings) -> list[tuple]:
+    if not Path(settings.audit_db_path).exists():
+        return []
+    conn = sqlite3.connect(settings.audit_db_path)
+    try:
+        return conn.execute("SELECT request_id, role, final_status, row_count, masked_columns, generated_sql "
+                            "FROM audit_log ORDER BY seq").fetchall()
+    finally:
+        conn.close()
 
 
 def table_counts(db_path: Path) -> dict[str, int]:
