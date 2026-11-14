@@ -117,7 +117,14 @@ def test_task1_pattern_queries_unaffected():
     import json
     from glasshouse.config import DEFAULT_FIXTURE_PATH
     fixtures = json.loads(DEFAULT_FIXTURE_PATH.read_text(encoding="utf-8"))["responses"]
-    for q in [k for k in fixtures if k.startswith("Which")]:
+    # The three Task 1 README pattern questions, named explicitly (the fixture file also holds
+    # Task 3 eval questions, some of which are deliberately role-restricted).
+    pattern_questions = [
+        "Which accounts have 3 or more cash deposits between ₹40,000 and ₹49,999 within 7 days?",
+        "Which dormant accounts were reactivated with at least ₹5,00,000 in credits within 7 days?",
+        "Which accounts sent or received SWIFT wires involving high-risk countries?",
+    ]
+    for q in pattern_questions:
         for role in (L1, L2, AUD):
             d = decide(fixtures[q]["sql"], role)
             assert d.ok and all(m is None for m in d.mask_plan), (q, role.name, d.reason)
