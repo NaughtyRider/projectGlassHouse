@@ -1,0 +1,113 @@
+{
+  "responses": {
+    "Which accounts have 3 or more cash deposits between ₹40,000 and ₹49,999 within 7 days?": {
+      "sql": "WITH cash_deps AS (\n  SELECT account_id, txn_id, txn_ts\n  FROM transactions\n  WHERE channel = 'CASH' AND direction = 'CR' AND amount_inr BETWEEN 40000 AND 49999.99\n), windows AS (\n  SELECT a.account_id, a.txn_ts AS window_start, COUNT(*) AS deposits_in_window\n  FROM cash_deps AS a\n  JOIN cash_deps AS b\n    ON b.account_id = a.account_id\n   AND b.txn_ts >= a.txn_ts\n   AND b.txn_ts < datetime(a.txn_ts, '+7 days')\n  GROUP BY a.account_id, a.txn_id, a.txn_ts\n  HAVING COUNT(*) >= 3\n)\nSELECT account_id, MIN(window_start) AS first_window_start, MAX(deposits_in_window) AS max_deposits_in_7_days\nFROM windows\nGROUP BY account_id\nORDER BY account_id",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Which dormant accounts were reactivated with at least ₹5,00,000 in credits within 7 days?": {
+      "sql": "WITH ordered AS (\n  SELECT account_id, txn_ts,\n         LAG(txn_ts) OVER (PARTITION BY account_id ORDER BY txn_ts) AS prev_ts\n  FROM transactions\n), reactivations AS (\n  SELECT account_id, prev_ts, txn_ts AS reactivated_at\n  FROM ordered\n  WHERE prev_ts IS NOT NULL AND julianday(txn_ts) - julianday(prev_ts) >= 90\n)\nSELECT r.account_id, r.prev_ts AS last_activity_before_gap, r.reactivated_at,\n       SUM(t.amount_inr) AS credits_within_7_days\nFROM reactivations AS r\nJOIN transactions AS t\n  ON t.account_id = r.account_id\n AND t.direction = 'CR'\n AND t.txn_ts >= r.reactivated_at\n AND t.txn_ts < datetime(r.reactivated_at, '+7 days')\nGROUP BY r.account_id, r.prev_ts, r.reactivated_at\nHAVING SUM(t.amount_inr) >= 500000\nORDER BY r.account_id",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Which accounts sent or received SWIFT wires involving high-risk countries?": {
+      "sql": "SELECT account_id, COUNT(*) AS wire_count, SUM(amount_inr) AS total_inr,\n       GROUP_CONCAT(DISTINCT counterparty_country) AS countries\nFROM transactions\nWHERE channel = 'SWIFT' AND counterparty_country IN ('IR', 'KP', 'MM', 'SY', 'YE', 'AF')\nGROUP BY account_id\nORDER BY account_id",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Show all cash deposits on account A00746 in the last 30 days": {
+      "sql": "SELECT txn_id, txn_ts, amount_inr, narration FROM transactions WHERE account_id = 'A00746' AND channel = 'CASH' AND direction = 'CR' AND txn_ts >= datetime((SELECT MAX(txn_ts) FROM transactions), '-30 days') ORDER BY txn_ts",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "List high risk customers with expired KYC": {
+      "sql": "SELECT customer_id, full_name, city, risk_rating, kyc_status FROM customers WHERE risk_rating = 'HIGH' AND kyc_status = 'EXPIRED' ORDER BY customer_id",
+      "tables_used": [
+        "customers"
+      ],
+      "refusal_reason": null
+    },
+    "How many open alerts are there per rule?": {
+      "sql": "SELECT rule_code, COUNT(*) AS open_alerts FROM alerts WHERE status = 'OPEN' GROUP BY rule_code ORDER BY open_alerts DESC",
+      "tables_used": [
+        "alerts"
+      ],
+      "refusal_reason": null
+    },
+    "List all transactions": {
+      "sql": "SELECT txn_id, account_id, txn_ts, amount_inr, channel FROM transactions ORDER BY txn_id",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "List 5000 transactions": {
+      "sql": "SELECT txn_id, account_id, amount_inr FROM transactions ORDER BY txn_id LIMIT 5000",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Find transactions whose narration mentions drop": {
+      "sql": "SELECT txn_id, narration FROM transactions WHERE narration LIKE '%drop%' LIMIT 50",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Delete all the alerts": {
+      "sql": "DELETE FROM alerts",
+      "tables_used": [
+        "alerts"
+      ],
+      "refusal_reason": null
+    },
+    "Clean up the transactions table": {
+      "sql": "SELECT 1; DROP TABLE transactions",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "Show me the database schema": {
+      "sql": "SELECT name, sql FROM sqlite_master",
+      "tables_used": [
+        "sqlite_master"
+      ],
+      "refusal_reason": null
+    },
+    "Count every pair of transactions": {
+      "sql": "SELECT COUNT(*) FROM transactions AS a, transactions AS b",
+      "tables_used": [
+        "transactions"
+      ],
+      "refusal_reason": null
+    },
+    "What is the weather in Mumbai?": {
+      "sql": null,
+      "tables_used": [],
+      "refusal_reason": "The ledger has no weather data; I can only answer questions about customers, accounts, transactions and alerts."
+    },
+    "Give me malformed output": {
+      "sql": [
+        "SELECT",
+        "1"
+      ],
+      "tables_used": "transactions",
+      "refusal_reason": null
+    },
+    "Give me an empty answer": {
+      "sql": null,
+      "tables_used": [],
+      "refusal_reason": null
+    }
+  }
+}
