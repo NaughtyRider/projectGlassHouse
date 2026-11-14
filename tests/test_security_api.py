@@ -119,12 +119,14 @@ def test_denied_column_anywhere_rejected_l1(app_settings, pii, sql, needle):
     assert body["rows"] == []
 
 
-def test_partial_mask_keeps_last_four(app_settings, db_path):
+def test_partial_mask_keeps_last_four_digits(app_settings, db_path):
+    # PAN format AAAAA9999A: the 4-digit serial is shown, the check letter is hidden (ABCDE1234F -> XXXXXX1234).
     body = run(app_settings, "SELECT customer_id, pan FROM customers ORDER BY customer_id LIMIT 3", "l2_investigator")
     conn = sqlite3.connect(db_path)
     real = dict(conn.execute("SELECT customer_id, pan FROM customers ORDER BY customer_id LIMIT 3").fetchall())
     for cid, masked in body["rows"]:
-        assert masked == "X" * (len(real[cid]) - 4) + real[cid][-4:]
+        assert masked == "XXXXXX" + real[cid][5:9]
+        assert len(masked) == len(real[cid])
     assert body["masked_columns"] == ["pan"]
 
 

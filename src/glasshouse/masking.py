@@ -13,13 +13,23 @@ VISIBLE_TAIL = 4
 
 
 def mask_partial(value: Any) -> Any:
-    """Keep the last 4 characters: 'ABCDE1234F' -> 'XXXXXX234F'. Short values are fully masked."""
+    """Show only the last 4 *digits*, right-aligned; mask everything else; preserve length.
+
+        PAN            'ABCDE1234F'     -> 'XXXXXX1234'      (assignment's reference example)
+        phone          '+919876543210'  -> 'XXXXXXXXX3210'
+        account number '5010123456780012' -> 'XXXXXXXXXXXX0012'
+
+    For phone and account numbers this equals "keep the last 4 characters"; for PAN it hides
+    the trailing check letter and shows the 4-digit serial instead. Values with fewer than 4
+    digits, or no longer than 4 characters, are masked completely (nothing to reveal safely).
+    """
     if value is None:
         return None
     s = str(value)
-    if len(s) <= VISIBLE_TAIL:
-        return MASK_CHAR * len(s) if s else s
-    return MASK_CHAR * (len(s) - VISIBLE_TAIL) + s[-VISIBLE_TAIL:]
+    digits = [c for c in s if c.isdigit()]
+    if len(s) <= VISIBLE_TAIL or len(digits) < VISIBLE_TAIL:
+        return MASK_CHAR * len(s)
+    return MASK_CHAR * (len(s) - VISIBLE_TAIL) + "".join(digits[-VISIBLE_TAIL:])
 
 
 def mask_full(value: Any) -> Any:
