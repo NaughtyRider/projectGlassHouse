@@ -27,7 +27,7 @@ source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
 python -m glasshouse.generate --seed 42      # builds data/glasshouse.db (~1 s)
-pytest -q                                     # 288 tests, offline, ~20 s
+pytest -q                                     # 323 tests, offline, ~20 s
 uvicorn glasshouse.app:app --port 8000        # serves the API (run from the repo root)
 ```
 
@@ -126,8 +126,16 @@ the default high-risk list. If you change `GLASSHOUSE_HIGH_RISK_COUNTRIES`, upda
 
 The handler never returns HTTP 500. Any unexpected exception becomes `status: error`.
 A missing, empty, unknown or wrongly-typed `role` gets **HTTP 403** with the same response body,
-`status: rejected`, and a reason listing the valid roles. A request body that otherwise fails
-schema validation, such as an empty question, gets FastAPI's standard 422.
+`status: rejected`, and a reason listing the valid roles.
+
+**The role is checked first**, before any other body validation. So a request whose role is
+missing or unknown gets 403 even if the rest of the body is also broken: no question, invalid
+JSON, a JSON array, form-encoded data, an empty body. Only a request with a **valid role** but an
+otherwise invalid body (a missing, empty, over-long or wrongly-typed `question`) gets FastAPI's
+standard 422. That 422 body is unchanged (`{"detail": [...]}`), with one extra `request_id`
+field. Both 403 and 422 responses carry an `X-Request-ID` header that matches the audit record.
+Validation on other endpoints (e.g. `GET /audit?limit=0`) keeps FastAPI's default behaviour and
+is not audited.
 `GET /health` reports the provider, the configured roles and whether the database exists.
 `GET /audit?limit=N` is described [below](#audit-trail).
 
@@ -258,9 +266,9 @@ If any contributing column is `mask` for the role, that output position is maske
 
 | Output expression (l2_investigator) | Lineage | Result |
 |---|---|---|
-| `pan` | direct passthrough of `customers.pan` | `XXXXXX234F` (partial: last 4 visible) |
-| `pan AS customer_identifier` | direct | `XXXXXX234F` |
-| `t.v` from `(SELECT pan AS v …) t`, or via a CTE | direct (alias/scope hops only) | `XXXXXX234F` |
+| `pan` | direct passthrough of `customers.pan` | `XXXXXX1234` (partial: last 4 digits visible) |
+| `pan AS customer_identifier` | direct | `XXXXXX1234` |
+| `t.v` from `(SELECT pan AS v …) t`, or via a CTE | direct (alias/scope hops only) | `XXXXXX1234` |
 | `substr(pan, 1, 10)` | transformed | `XXXXXXXX` (full) |
 | `upper(pan)` | transformed | `XXXXXXXX` |
 | `'PAN:' \|\| pan` | transformed | `XXXXXXXX` |
@@ -268,15 +276,33 @@ If any contributing column is `mask` for the role, that output position is maske
 | `GROUP_CONCAT(pan)`, `CASE WHEN … THEN pan END` | transformed | `XXXXXXXX` |
 | `account_number` (l1 / l2) | direct | `XXXXXXXXXXXX0012` |
 
-**Why transformed values are fully masked.** "Keep the last 4 characters" is only safe when the
-value *is* the column. With `'XXXX' || substr(pan, 1, 4)`, the last 4 characters of the output
-are the PAN's *first* 4. So partial masking is used only for direct passthroughs, and anything
+**Why transformed values are fully masked.** Showing a tail of the value is only safe when the
+value *is* the column. With `'XXXX' || substr(pan, 1, 4)` or `'0000' || substr(pan, 6, 4)`, the
+visible tail would be a part of the PAN chosen by whoever wrote the query. So partial masking is used only for direct passthroughs, and anything
 computed gets a fixed-width `XXXXXXXX`, which also hides the length. Over-masking (for example
 `COUNT(DISTINCT pan)`) is the deliberate trade-off.
 
-The mask rule keeps the last four characters: `ABCDE1234F` → `XXXXXX234F`. The brief's example
-(`XXXXXX1234`) shows the last four *digits*, which doesn't match its own "last four characters"
-rule. I followed the stated rule.
+**Partial-mask rule: the last four digits stay visible, everything else is masked, and the length
+is preserved.** [masking.py](src/glasshouse/masking.py) implements it:
+
+| Column | Original | Masked |
+|---|---|---|
+| PAN | `ABCDE1234F` | `XXXXXX1234` (the brief's reference example) |
+| phone | `+919876543210` | `XXXXXXXXX3210` |
+| account number | `5010123456780012` | `XXXXXXXXXXXX0012` |
+| fewer than 4 digits, or 4 characters or fewer | `AB12`, `ABCDEFGHIJ` | fully masked (`XXXX`, `XXXXXXXXXX`) |
+
+*Why this interpretation.* The brief says "keep the last four characters visible" but gives
+`ABCDE1234F → XXXXXX1234`. Those two statements disagree for PAN, whose last character is a
+check letter. "Last four characters" would give `XXXXXX234F`. Reading it as "last four
+**digits**":
+- matches the explicit example exactly;
+- gives byte-for-byte the same output as before for phone numbers and account numbers;
+- is slightly stricter for PAN, since the check letter is no longer shown.
+
+*Change history.* The first Task 2 version used "last four characters" (`XXXXXX234F`). It was
+changed on purpose to the digits rule, and the affected test was renamed to
+`test_partial_mask_keeps_last_four_digits`. `tests/test_masking.py` pins the reference example.
 
 Masked columns can still be used in `WHERE`, `JOIN`, `GROUP BY` and `ORDER BY` (for example, look
 up a customer by PAN). Only output values are masked. Masking is applied by **output position**,
@@ -309,14 +335,22 @@ and tests check those prompts for each role. The database schema itself is uncha
 ### Audit trail
 
 Every `/ask` call writes **exactly one** row to `audit_log` in a separate SQLite file
-(`data/audit.db`). This includes ok, refused, rejected (validator or policy), error (malformed
-output, execution failure, timeout, unexpected exception) and 403 role failures. The row has
+(`data/audit.db`). This includes:
+- ok, refused and rejected (by the validator or the policy);
+- error (malformed output, execution failure, timeout, unexpected exception);
+- 403 role failures;
+- **bodies FastAPI rejects**: missing fields, invalid JSON, wrong types. A
+  `RequestValidationError` handler scoped to `POST /ask` records them as `rejected` with reason
+  `invalid request: <field> invalid`, plus whatever role and question could be read from the raw
+  body. The row has
 `request_id, timestamp (UTC), role, question, generated_sql (raw provider SQL), final_status,
 reason, row_count, masked_columns`.
 
-- **One write, in one place.** The pipeline (`_process`) never writes to the audit log. It
+- **One write per request.** The pipeline (`_process`) never writes to the audit log. It
   returns an outcome, even on unexpected exceptions, and `AskService.ask` then writes the single
-  record. No exception path can cause a double write.
+  record through `_audit`. For a body that fails validation, the route never runs, and
+  `reject_invalid_request` writes the single record through the same `_audit`. The two paths are
+  mutually exclusive, so no request is recorded twice.
 - **Fail closed.** If the audit write fails, the response is replaced with `status: error`,
   no rows, "audit log unavailable". No data leaves without an audit record.
 - **Append-only.** The table has `BEFORE UPDATE` / `BEFORE DELETE` triggers that abort, and the
@@ -339,7 +373,7 @@ returns 503, not 500.
 curl -s -X POST localhost:8000/ask -H 'content-type: application/json' \
   -d '{"question": "Show identity details for high risk customers", "role": "l2_investigator"}'
 # {"status":"ok","columns":["customer_id","full_name","pan","phone"],
-#  "rows":[["C00010","Aadhya Khan","XXXXXX916T","XXXXXXXXX2202"], ...],
+#  "rows":[["C00010","Aadhya Khan","XXXXXX6916","XXXXXXXXX2202"], ...],
 #  "masked_columns":["pan","phone"], ...}
 
 # same question as l1_analyst -> rejected (full_name/pan/phone are denied)
@@ -364,11 +398,13 @@ In PowerShell, use `Invoke-RestMethod` with a `ConvertTo-Json` body, or the inte
 ### Security test commands
 
 ```bash
-pytest -q                                # everything (288 tests)
+pytest -q                                # everything (323 tests)
 pytest -q tests/test_security_api.py     # end-to-end masking/deny bypass attempts via /ask
 pytest -q tests/test_access.py           # AST enforcement + lineage plans + authorizer 2nd layer
 pytest -q tests/test_policy.py           # policy loading/validation, roles, filtered prompts
 pytest -q tests/test_audit.py            # one-record-per-request, /audit, separation, append-only
+pytest -q tests/test_request_validation.py  # 403-before-422, malformed bodies audited
+pytest -q tests/test_masking.py          # last-4-digits rule incl. ABCDE1234F -> XXXXXX1234
 pytest -q -k "bypass or denied"          # just the bypass/deny cases
 ```
 
@@ -405,9 +441,10 @@ tests failed:
   `COUNT(DISTINCT pan)`.
 - **The table-wide deny for auditors** also blocks harmless counts on `customers`. That's
   intentional ("all customers columns = deny").
-- **Unaudited 422s.** Requests rejected by FastAPI's request-body validation before reaching the
-  handler (for example, a missing `question`) are not audited. Every request that reaches `/ask`
-  logic is.
+- **What audit can't see.** Requests rejected before FastAPI's routing, such as a wrong HTTP
+  method (405) or a connection dropped mid-body, are not audited; these never reach `/ask`.
+  The raw body of a malformed request is not stored, only the role and question that could be
+  read from it.
 - **The audit DB is append-only at the application level** (triggers). Anyone with filesystem
   access can still delete the file. Production would ship records to WORM storage or a SIEM.
 
@@ -418,6 +455,8 @@ tests failed:
 | `tests/test_policy.py` | Policy YAML validation (10 malformed variants), the permission matrix, no default role, role-filtered prompts (including the prompt actually sent to the provider) |
 | `tests/test_access.py` | Denied columns in SELECT/WHERE/JOIN/GROUP BY/HAVING/ORDER BY/subqueries/CTEs/UNION/window/CASE/aliases/quoted identifiers; `SELECT *` rejection; lineage mask plans; the authorizer column-deny layer |
 | `tests/test_security_api.py` | 15 bypass attempts × (l2 masked with no PII leak, l1 rejected); deny-anywhere cases; account number across roles; 403 role validation, with proof the provider/ledger is never reached |
+| `tests/test_masking.py` | The partial-mask rule, including the brief's `ABCDE1234F → XXXXXX1234` example, phone/account/short/no-digit values, length preserved, at most 4 characters revealed, positional application, shape mismatch fails closed |
+| `tests/test_request_validation.py` | Role checked first: 12 malformed or role-less bodies give 403; 4 invalid bodies with a valid role give the standard 422 plus `request_id`; exactly one audit record each; the provider is never called; other endpoints' validation is untouched and not audited |
 | `tests/test_audit.py` | Exactly one record per outcome (ok/rejected/policy/refused/malformed/execution error/timeout/403/exception); `/audit` ordering and limit validation; malformed and corrupt audit data; append-only triggers; audit not reachable from `/ask`; separate files |
 | `tests/test_validator.py` | 38 unsafe cases (DDL/DML, stacked statements, ATTACH/PRAGMA/VACUUM, catalogs, writes nested in CTEs, `SELECT INTO`, mixed case, comment obfuscation, dangerous functions) and 12 legitimate ones, including `narration LIKE '%drop%'` and SQL inside string literals |
 | `tests/test_executor.py` | AST row-cap rewriting, 200/1000 caps on real data, the 2 s timeout (< 3 s total), read-only connection, the authorizer blocking catalog and non-allow-listed reads when the validator is bypassed |

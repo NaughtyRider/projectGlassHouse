@@ -155,7 +155,10 @@ def test_provider_exception_is_error_not_500(app_settings):
 
 
 def test_invalid_request_is_422(client):
-    assert client.post("/ask", json={"question": ""}).status_code == 422
+    # FastAPI validation is preserved for a request with a valid role...
+    assert client.post("/ask", json={"question": "", "role": "l1_analyst"}).status_code == 422
+    # ...but since Task 2 a missing role is checked first and is always 403.
+    assert client.post("/ask", json={"question": ""}).status_code == 403
 
 
 def test_prompt_includes_schema():

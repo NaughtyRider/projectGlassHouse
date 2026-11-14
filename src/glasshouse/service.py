@@ -67,12 +67,47 @@ class AskService:
             log.exception("unexpected failure in request %s", request_id)
             outcome = AskOutcome(AskResponse(request_id=request_id, status="error", reason="internal error"))
 
+        if not self._audit(outcome, req.role, req.question):
+            # Fail closed: no data leaves the system without an audit trail.
+            return AskOutcome(
+                AskResponse(request_id=request_id, status="error", reason="audit log unavailable; request not served"),
+                http_status=outcome.http_status,
+                generated_sql=outcome.generated_sql,
+            )
+        return outcome
+
+    def reject_invalid_request(self, raw_body: Any, errors: list[dict]) -> AskOutcome:
+        """Handle a POST /ask body that failed FastAPI validation (missing fields, bad JSON, ...).
+
+        The role is checked first, so a missing/unknown role is always 403, even when other
+        fields are also invalid. Otherwise the caller returns FastAPI's standard 422. Either way
+        exactly one audit record is written; the provider and ledger are never touched.
+        """
+        request_id = uuid.uuid4().hex
+        payload = raw_body if isinstance(raw_body, dict) else {}
+        role, question = payload.get("role"), payload.get("question")
+        try:
+            self.policy.get_role(role)
+        except UnknownRoleError as e:
+            outcome = AskOutcome(AskResponse(request_id=request_id, status="rejected", reason=str(e)), http_status=403)
+        else:
+            fields = sorted({".".join(str(p) for p in err.get("loc", ())[1:]) or "body" for err in errors})
+            outcome = AskOutcome(
+                AskResponse(request_id=request_id, status="rejected",
+                            reason="invalid request: " + ", ".join(f"{f} invalid" for f in fields)),
+                http_status=422,
+            )
+        self._audit(outcome, role, question)  # nothing is served either way, so no fail-closed swap needed
+        return outcome
+
+    def _audit(self, outcome: AskOutcome, role: Any, question: Any) -> bool:
+        """Write the one audit record for this request. Returns False if it could not be written."""
         resp = outcome.response
         try:
             self.audit.record(AuditRecord(
-                request_id=request_id,
-                role=req.role if isinstance(req.role, str) else (None if req.role is None else repr(req.role)),
-                question=req.question,
+                request_id=resp.request_id,
+                role=role if isinstance(role, str) else (None if role is None else repr(role)),
+                question=question if isinstance(question, str) else (None if question is None else repr(question)),
                 generated_sql=outcome.generated_sql,
                 final_status=resp.status,
                 reason=resp.reason,
@@ -80,14 +115,9 @@ class AskService:
                 masked_columns=resp.masked_columns,
             ))
         except AuditError:
-            # Fail closed: no data leaves the system without an audit trail.
-            log.exception("audit write failed for request %s", request_id)
-            return AskOutcome(
-                AskResponse(request_id=request_id, status="error", reason="audit log unavailable; request not served"),
-                http_status=outcome.http_status,
-                generated_sql=outcome.generated_sql,
-            )
-        return outcome
+            log.exception("audit write failed for request %s", resp.request_id)
+            return False
+        return True
 
     def _process(self, rid: str, req: AskRequest) -> AskOutcome:
         # 1. Role: exact match against the policy, never defaulted.

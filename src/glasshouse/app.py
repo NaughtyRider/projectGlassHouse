@@ -5,8 +5,14 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
+import json
+
+from fastapi import FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from glasshouse.audit import AuditError, AuditLog
 from glasshouse.config import Settings
@@ -33,6 +39,24 @@ def create_app(
 
     app = FastAPI(title="GlassHouse", description="Guarded text-to-SQL for AML investigations")
     app.state.service = service
+
+    @app.exception_handler(RequestValidationError)
+    async def on_validation_error(request: Request, exc: RequestValidationError):
+        # Other endpoints keep FastAPI's default behaviour untouched.
+        if not (request.method == "POST" and request.url.path == "/ask"):
+            return await request_validation_exception_handler(request, exc)
+        try:
+            raw = json.loads(await request.body() or b"null")
+        except (ValueError, UnicodeDecodeError):
+            raw = None
+        outcome = await run_in_threadpool(service.reject_invalid_request, raw, exc.errors())
+        rid = outcome.response.request_id
+        if outcome.http_status == 403:
+            return JSONResponse(status_code=403, content=outcome.response.model_dump(),
+                                headers={"X-Request-ID": rid})
+        # Standard FastAPI 422 body ({"detail": [...]}) plus the audit request_id.
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors()), "request_id": rid},
+                            headers={"X-Request-ID": rid})
 
     @app.get("/health")
     def health() -> dict:
