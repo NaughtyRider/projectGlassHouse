@@ -66,15 +66,19 @@ _RECURSIVE = getattr(sqlite3, "SQLITE_RECURSIVE", 33)
 _ALLOWED_ACTIONS.add(_RECURSIVE)
 
 
-def _make_authorizer(allowed_tables: frozenset[str]):
+def _make_authorizer(allowed_tables: frozenset[str], denied_columns: frozenset[tuple[str, str]] = frozenset()):
     def authorizer(action: int, arg1: str | None, arg2: str | None, db_name: str | None, trigger: str | None) -> int:
         if action not in _ALLOWED_ACTIONS:
             return sqlite3.SQLITE_DENY
         if action == sqlite3.SQLITE_READ:
-            # arg1 = table name. Reads with no table (e.g. CTE / subquery columns) come through as None.
+            # arg1 = table name, arg2 = column. Reads with no table (CTE / subquery columns) come as None.
             if arg1 is not None and arg1.lower() not in allowed_tables:
                 return sqlite3.SQLITE_DENY
             if db_name not in (None, "main"):
+                return sqlite3.SQLITE_DENY
+            # Second, engine-level layer for the role policy: SQLite itself refuses denied columns
+            # even if the AST analysis in access.py were somehow bypassed.
+            if arg1 is not None and arg2 is not None and (arg1.lower(), arg2.lower()) in denied_columns:
                 return sqlite3.SQLITE_DENY
         if action == sqlite3.SQLITE_FUNCTION and arg2 and arg2.lower() in {"load_extension", "readfile", "writefile"}:
             return sqlite3.SQLITE_DENY
@@ -99,6 +103,7 @@ def execute_query(
     timeout_seconds: float = 2.0,
     default_limit: int = 200,
     max_limit: int = 1000,
+    denied_columns: frozenset[tuple[str, str]] = frozenset(),
 ) -> QueryResult:
     capped = apply_row_cap(tree, default_limit, max_limit)
     sql = capped.sql(dialect=DIALECT)
@@ -106,7 +111,7 @@ def execute_query(
 
     conn = open_readonly(db_path)
     try:
-        conn.set_authorizer(_make_authorizer(allowed))
+        conn.set_authorizer(_make_authorizer(allowed, denied_columns))
         start = time.monotonic()
         deadline = start + timeout_seconds
         timed_out = False

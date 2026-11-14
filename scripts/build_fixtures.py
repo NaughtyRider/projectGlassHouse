@@ -93,6 +93,17 @@ RESPONSES = {
         "sql": "SELECT txn_id, narration FROM transactions WHERE narration LIKE '%drop%' LIMIT 50",
         "tables_used": ["transactions"], "refusal_reason": None},
 
+    # --- Task 2: PII / masking demos --------------------------------------
+    "Show identity details for high risk customers": {
+        "sql": "SELECT customer_id, full_name, pan, phone FROM customers WHERE risk_rating = 'HIGH' "
+               "ORDER BY customer_id LIMIT 5",
+        "tables_used": ["customers"], "refusal_reason": None},
+    "Show account numbers for accounts with open alerts": {
+        "sql": "SELECT DISTINCT a.account_id, a.account_number FROM accounts AS a "
+               "JOIN alerts AS al ON al.account_id = a.account_id WHERE al.status = 'OPEN' "
+               "ORDER BY a.account_id LIMIT 5",
+        "tables_used": ["accounts", "alerts"], "refusal_reason": None},
+
     # --- adversarial / failure-mode fixtures ------------------------------
     "Delete all the alerts": {
         "sql": "DELETE FROM alerts", "tables_used": ["alerts"], "refusal_reason": None},

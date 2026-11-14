@@ -9,6 +9,9 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = Path("data") / "glasshouse.db"
 DEFAULT_FIXTURE_PATH = PACKAGE_DIR / "fixtures" / "fake_responses.json"
+DEFAULT_AUDIT_DB_PATH = Path("data") / "audit.db"
+# <repo>/config/access_policy.yaml (src layout: src/glasshouse/ -> repo root is two levels up).
+DEFAULT_POLICY_PATH = PACKAGE_DIR.parents[1] / "config" / "access_policy.yaml"
 
 # ISO-3166 alpha-2 codes. Overridable with GLASSHOUSE_HIGH_RISK_COUNTRIES="IR,KP,...".
 DEFAULT_HIGH_RISK_COUNTRIES: tuple[str, ...] = ("IR", "KP", "MM", "SY", "YE", "AF")
@@ -33,6 +36,8 @@ class Settings:
     db_path: Path = DEFAULT_DB_PATH
     provider: str = "fake"  # "fake" | "ollama"
     fixture_path: Path = DEFAULT_FIXTURE_PATH
+    policy_path: Path = DEFAULT_POLICY_PATH
+    audit_db_path: Path = DEFAULT_AUDIT_DB_PATH
     timeout_seconds: float = 2.0
     default_limit: int = 200
     max_limit: int = 1000
@@ -46,6 +51,8 @@ class Settings:
             db_path=Path(os.environ.get("GLASSHOUSE_DB", str(DEFAULT_DB_PATH))),
             provider=os.environ.get("GLASSHOUSE_PROVIDER", "fake").lower(),
             fixture_path=Path(os.environ.get("GLASSHOUSE_FIXTURES", str(DEFAULT_FIXTURE_PATH))),
+            policy_path=Path(os.environ.get("GLASSHOUSE_POLICY", str(DEFAULT_POLICY_PATH))),
+            audit_db_path=Path(os.environ.get("GLASSHOUSE_AUDIT_DB", str(DEFAULT_AUDIT_DB_PATH))),
             timeout_seconds=float(os.environ.get("GLASSHOUSE_TIMEOUT_SECONDS", "2.0")),
             ollama_url=os.environ.get("GLASSHOUSE_OLLAMA_URL", "http://localhost:11434"),
             ollama_model=os.environ.get("GLASSHOUSE_OLLAMA_MODEL", "llama3.1"),
