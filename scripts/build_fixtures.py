@@ -8,6 +8,8 @@ Keys are human-readable questions; FakeProvider normalises them at load time.
 import json
 from pathlib import Path
 
+from build_eval_dataset import WRONG, eval_fixture_responses  # Task 3 eval answers (same scripts/ dir)
+
 OUT = Path(__file__).resolve().parents[1] / "src" / "glasshouse" / "fixtures" / "fake_responses.json"
 
 STRUCTURING_SQL = """\
@@ -125,6 +127,15 @@ RESPONSES = {
 }
 
 if __name__ == "__main__":
+    eval_responses = eval_fixture_responses()
+    clash = set(RESPONSES) & set(eval_responses)
+    assert not clash, f"eval questions collide with existing fixtures: {clash}"
+    payload = {
+        "responses": {**RESPONSES, **eval_responses},
+        # Metadata only (FakeProvider ignores it): eval answers that are wrong on purpose, and why.
+        "deliberately_wrong": WRONG,
+    }
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"responses": RESPONSES}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"wrote {len(RESPONSES)} fixtures to {OUT}")
+    OUT.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"wrote {len(payload['responses'])} fixtures ({len(eval_responses)} eval, "
+          f"{len(WRONG)} deliberately wrong) to {OUT}")
